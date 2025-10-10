@@ -3,6 +3,7 @@
 
 #include "framework.h"
 #include "CEF.h"
+#include <Windowsx.h>
 
 #define MAX_LOADSTRING 100
 
@@ -76,7 +77,7 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_CEF));
     wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
     wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW+1);
-    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_CEF);
+    wcex.lpszMenuName = nullptr;
     wcex.lpszClassName  = szWindowClass;
     wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
 
@@ -95,21 +96,29 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
 //
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
-   hInst = hInstance; // Сохранить маркер экземпляра в глобальной переменной
+    hInst = hInstance;
 
-   HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-      CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+    // Прямо задаём размер и позицию
+    int width = 800;
+    int height = 600;
 
-   if (!hWnd)
-   {
-      return FALSE;
-   }
+    HWND hWnd = CreateWindowW(
+        szWindowClass,
+        szTitle,
+        WS_POPUP | WS_THICKFRAME | WS_VISIBLE, // <---- вот здесь добавили WS_THICKFRAME
+        100, 100, 800, 600,
+        nullptr, nullptr, hInstance, nullptr
+    );
 
-   ShowWindow(hWnd, nCmdShow);
-   UpdateWindow(hWnd);
+    if (!hWnd)
+        return FALSE;
 
-   return TRUE;
+    ShowWindow(hWnd, SW_SHOW);
+    UpdateWindow(hWnd);
+
+    return TRUE;
 }
+
 
 //
 //  ФУНКЦИЯ: WndProc(HWND, UINT, WPARAM, LPARAM)
@@ -125,31 +134,58 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
+    case WM_NCHITTEST:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(hWnd, &pt);
+
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+
+        int borderWidth = 10; // <-- вот здесь регулируешь толщину рамки (по вкусу)
+
+        bool left = pt.x < borderWidth;
+        bool right = pt.x > rc.right - borderWidth;
+        bool top = pt.y < borderWidth;
+        bool bottom = pt.y > rc.bottom - borderWidth;
+
+        if (top && left)      return HTTOPLEFT;
+        if (top && right)     return HTTOPRIGHT;
+        if (bottom && left)   return HTBOTTOMLEFT;
+        if (bottom && right)  return HTBOTTOMRIGHT;
+        if (top)              return HTTOP;
+        if (bottom)           return HTBOTTOM;
+        if (left)             return HTLEFT;
+        if (right)            return HTRIGHT;
+
+        // Если не попали в рамку, позволяем двигать окно
+        return HTCAPTION;
+    }
     case WM_COMMAND:
+    {
+        int wmId = LOWORD(wParam);
+        // Разобрать выбор в меню:
+        switch (wmId)
         {
-            int wmId = LOWORD(wParam);
-            // Разобрать выбор в меню:
-            switch (wmId)
-            {
-            case IDM_ABOUT:
-                DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
-                break;
-            case IDM_EXIT:
-                DestroyWindow(hWnd);
-                break;
-            default:
-                return DefWindowProc(hWnd, message, wParam, lParam);
-            }
+        case IDM_ABOUT:
+            DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
+            break;
+        case IDM_EXIT:
+            DestroyWindow(hWnd);
+            break;
+        default:
+            return DefWindowProc(hWnd, message, wParam, lParam);
         }
-        break;
+    }
+    break;
     case WM_PAINT:
-        {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hWnd, &ps);
-            // TODO: Добавьте сюда любой код прорисовки, использующий HDC...
-            EndPaint(hWnd, &ps);
-        }
-        break;
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        // TODO: Добавьте сюда любой код прорисовки, использующий HDC...
+        EndPaint(hWnd, &ps);
+    }
+    break;
     case WM_DESTROY:
         PostQuitMessage(0);
         break;
