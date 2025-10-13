@@ -1,13 +1,11 @@
 ﻿// CEF.cpp : Определяет точку входа для приложения.
 //
 
-// вверху файла — WIN32 defines уже у тебя есть:
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
-#include <Windowsx.h> // если нужен - но он и вызывает многие макросы
+#include <Windowsx.h>
 
-// Сохраняем и временно убираем конфликтные макросы:
 #pragma push_macro("GetNextSibling")
 #pragma push_macro("GetFirstChild")
 #pragma push_macro("GetParent")
@@ -42,16 +40,18 @@
 #undef GetWindowText
 #endif
 
-// Теперь безопасно подключаем CEF:
+#include <vector>
+#include <cstdint>
+
 #include "include/cef_app.h"
 #include "include/cef_client.h"
 #include "include/cef_browser.h"
+#include "include/cef_render_handler.h"
+#include "include/cef_drag_handler.h"
 #include "include/base/cef_scoped_refptr.h"
 #include "include/internal/cef_types_wrappers.h"
 #include "include/cef_base.h"
-#include "include/cef_dom.h" // если нужен
 
-// Восстанавливаем макросы в прежнее состояние:
 #pragma pop_macro("GetWindowText")
 #pragma pop_macro("GetObject")
 #pragma pop_macro("SetParent")
@@ -62,8 +62,6 @@
 #pragma pop_macro("GetNextSibling")
 #include "resource.h"
 
-
-
 #define MAX_LOADSTRING 100
 
 // Глобальные переменные:
@@ -71,6 +69,8 @@ HINSTANCE hInst;                                // текущий экземпл
 WCHAR szTitle[MAX_LOADSTRING];                  // Текст строки заголовка
 WCHAR szWindowClass[MAX_LOADSTRING];            // имя класса главного окна
 CefRefPtr<CefBrowser> g_browser;
+HWND g_hwnd = nullptr;
+std::vector<CefDraggableRegion> g_draggable_regions;
 
 // Отправить объявления функций, включенных в этот модуль кода:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
@@ -78,30 +78,75 @@ BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 
-// Добавьте этот класс в отдельный .h/.cpp файл, но для примера пусть будет здесь
-class SimpleHandler : public CefClient, public CefLifeSpanHandler {
+// Прототип функции modifiers (надо объявить до использования в WndProc)
+uint32_t GetCefStateModifiers(WPARAM wparam);
+
+// Класс для обработки рендеринга и drag
+class SimpleHandler : public CefClient,
+    public CefLifeSpanHandler,
+    public CefRenderHandler,
+    public CefDragHandler {
 public:
-    // ИЗМЕНЕНИЕ: Заменить OVERRIDE на override
-    virtual CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override {
-        return CefRefPtr<CefLifeSpanHandler>(this);
+    CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override {
+        return this;
     }
 
-    // ИЗМЕНЕНИЕ: Заменить OVERRIDE на override
+    CefRefPtr<CefRenderHandler> GetRenderHandler() override {
+        return this;
+    }
+
+    CefRefPtr<CefDragHandler> GetDragHandler() override {
+        return this;
+    }
+
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
         g_browser = browser;
     }
 
-    // ИЗМЕНЕНИЕ: Заменить OVERRIDE на override
     bool DoClose(CefRefPtr<CefBrowser> browser) override {
         return false;
     }
 
-    // ИЗМЕНЕНИЕ: Заменить OVERRIDE на override
     void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
         g_browser = nullptr;
     }
 
-    // Макрос IMPLEMENT_REFCOUNTING из "include/base/cef_base.h"
+    // CefRenderHandler methods
+    void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override {
+        RECT client_rect;
+        GetClientRect(g_hwnd, &client_rect);
+        rect = CefRect(0, 0, client_rect.right - client_rect.left,
+            client_rect.bottom - client_rect.top);
+    }
+
+    void OnPaint(CefRefPtr<CefBrowser> browser,
+        PaintElementType type,
+        const RectList& dirtyRects,
+        const void* buffer,
+        int width,
+        int height) override {
+        // Простой рендеринг: Копируем буфер в window DC
+        HDC hdc = GetDC(g_hwnd);
+        BITMAPINFO bmi = { 0 };
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;  // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        StretchDIBits(hdc, 0, 0, width, height, 0, 0, width, height,
+            buffer, &bmi, DIB_RGB_COLORS, SRCCOPY);
+        ReleaseDC(g_hwnd, hdc);
+    }
+
+    // CefDragHandler
+    void OnDraggableRegionsChanged(CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        const std::vector<CefDraggableRegion>& regions) override {
+        g_draggable_regions = regions;
+    }
+
     IMPLEMENT_REFCOUNTING(SimpleHandler);
 };
 
@@ -115,14 +160,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
-
     // Инициализация CEF
     CefMainArgs main_args(hInstance);
     CefSettings settings;
+    settings.windowless_rendering_enabled = true;  // Включаем OSR
 
-    // Создайте заглушку CefApp (если не нужны кастомные обработчики)
     CefRefPtr<CefApp> app;
-
     int exit_code = CefExecuteProcess(main_args, app, nullptr);
     if (exit_code >= 0) {
         return exit_code;
@@ -130,14 +173,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     CefInitialize(main_args, settings, app, nullptr);
 
-    // TODO: Разместите код здесь.
-
     // Инициализация глобальных строк
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
     LoadStringW(hInstance, IDC_CEF, szWindowClass, MAX_LOADSTRING);
     MyRegisterClass(hInstance);
 
-    // Выполнить инициализацию приложения:
     if (!InitInstance(hInstance, nCmdShow))
     {
         return FALSE;
@@ -147,34 +187,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     MSG msg;
 
-    // Цикл основного сообщения:
     while (GetMessage(&msg, nullptr, 0, 0))
     {
-
-        // Обработка сообщений CEF
-        CefDoMessageLoopWork();
-
         if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
         {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
 
+        CefDoMessageLoopWork();
     }
 
-    // Завершение работы CEF при выходе из цикла
     CefShutdown();
 
     return (int)msg.wParam;
 }
 
-
-
-//
-//  ФУНКЦИЯ: MyRegisterClass()
-//
-//  ЦЕЛЬ: Регистрирует класс окна.
-//
 ATOM MyRegisterClass(HINSTANCE hInstance)
 {
     WNDCLASSEXW wcex;
@@ -196,56 +224,34 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     return RegisterClassExW(&wcex);
 }
 
-//
-//   ФУНКЦИЯ: InitInstance(HINSTANCE, int)
-//
-//   ЦЕЛЬ: Сохраняет маркер экземпляра и создает главное окно
-//
-//   КОММЕНТАРИИ:
-//
-//        В этой функции маркер экземпляра сохраняется в глобальной переменной, а также
-//        создается и выводится главное окно программы.
-//
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
     hInst = hInstance;
 
-    // Прямо задаём размер и позицию
     int width = 800;
     int height = 600;
 
     HWND hWnd = CreateWindowW(
         szWindowClass,
         szTitle,
-        WS_POPUP | WS_THICKFRAME | WS_VISIBLE, // <---- вот здесь добавили WS_THICKFRAME
-        100, 100, 800, 600,
+        WS_POPUP | WS_VISIBLE | WS_THICKFRAME,  // WS_THICKFRAME для resize
+        100, 100, width, height,
         nullptr, nullptr, hInstance, nullptr
     );
 
     if (!hWnd)
         return FALSE;
 
-    // --- Добавление CEF ---
-// Настройки создания браузера
+    g_hwnd = hWnd;
+
+    // CEF в OSR mode
     CefBrowserSettings browser_settings;
     CefWindowInfo window_info;
+    window_info.SetAsWindowless(hWnd);  // OSR: без HWND для браузера
 
-    // Определяем размеры окна WinAPI
-    RECT browser_rect = { 0, 0, 800, 600 };
-
-    // ПРЕОБРАЗОВАНИЕ: Создаем CefRect из WinAPI RECT
-    CefRect cef_rect(browser_rect.left, browser_rect.top,
-        browser_rect.right - browser_rect.left,
-        browser_rect.bottom - browser_rect.top);
-
-    // Прикрепляем браузер к нашему HWND в качестве дочернего окна
-    window_info.SetAsChild(hWnd, cef_rect); // <--- Используем cef_rect
-
-    // Создаём браузер с начальным URL и нашим обработчиком
     CefBrowserHost::CreateBrowser(window_info, g_handler,
-        L"https://www.google.com", // Используем L"" для CefString
+        L"http://localhost:5173/",
         browser_settings, nullptr, nullptr);
-    // -----------------------
 
     ShowWindow(hWnd, SW_SHOW);
     UpdateWindow(hWnd);
@@ -253,81 +259,162 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     return TRUE;
 }
 
-
-//
-//  ФУНКЦИЯ: WndProc(HWND, UINT, WPARAM, LPARAM)
-//
-//  ЦЕЛЬ: Обрабатывает сообщения в главном окне.
-//
-//  WM_COMMAND  - обработать меню приложения
-//  WM_PAINT    - Отрисовка главного окна
-//  WM_DESTROY  - отправить сообщение о выходе и вернуться
-//
-//
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    switch (message)
-    {
-    case WM_SIZE:
-        if (g_browser.get()) {
-            RECT rect;
-            GetClientRect(hWnd, &rect);
+    if (g_browser) {
+        CefRefPtr<CefBrowserHost> host = g_browser->GetHost();
 
-            // Получаем HWND окна CEF
-            HWND cef_hwnd = g_browser->GetHost()->GetWindowHandle();
-
-            // Используем WinAPI для изменения размера дочернего окна
-            SetWindowPos(cef_hwnd,
-                NULL,
-                0, 0,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                SWP_NOZORDER);
-        }
-        break;
-
-    case WM_CLOSE:
-        // Сначала просим CEF закрыть браузер
-        if (g_browser.get()) {
-            g_browser->GetHost()->CloseBrowser(false);
-            // DefWindowProc не вызываем, т.к. закрытие окна WinAPI произойдет
-            // в OnBeforeClose после закрытия браузера.
+        switch (message) {
+        case WM_SIZE: {
+            int width = LOWORD(lParam);
+            int height = HIWORD(lParam);
+            host->WasResized();
             return 0;
         }
-        break;
-    case WM_NCHITTEST:
-    {
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        ScreenToClient(hWnd, &pt);
 
-        RECT rc;
-        GetClientRect(hWnd, &rc);
+        case WM_ERASEBKGND:
+            return 1;  // Не стираем фон, т.к. рендерим сами
 
-        int borderWidth = 10; // <-- вот здесь регулируешь толщину рамки (по вкусу)
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            BeginPaint(hWnd, &ps);
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
 
-        bool left = pt.x < borderWidth;
-        bool right = pt.x > rc.right - borderWidth;
-        bool top = pt.y < borderWidth;
-        bool bottom = pt.y > rc.bottom - borderWidth;
+        case WM_CLOSE:
+            host->CloseBrowser(false);
+            return 0;
 
-        if (top && left)      return HTTOPLEFT;
-        if (top && right)     return HTTOPRIGHT;
-        if (bottom && left)   return HTBOTTOMLEFT;
-        if (bottom && right)  return HTBOTTOMRIGHT;
-        if (top)              return HTTOP;
-        if (bottom)           return HTBOTTOM;
-        if (left)             return HTLEFT;
-        if (right)            return HTRIGHT;
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
 
-        // Если не попали в рамку, позволяем двигать окно
-        return HTCAPTION;
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+        case WM_MOUSEMOVE:
+        case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN:
+        case WM_RBUTTONUP:
+        case WM_MBUTTONDOWN:
+        case WM_MBUTTONUP:
+        case WM_MOUSEWHEEL: {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            CefMouseEvent event;
+            event.x = x;
+            event.y = y;
+            event.modifiers = GetCefStateModifiers(wParam);
+
+            if (message == WM_MOUSEWHEEL) {
+                POINT pt = { x, y };
+                ScreenToClient(hWnd, &pt);
+                event.x = pt.x;
+                event.y = pt.y;
+                int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+                // wheelX = 0, wheelY = delta
+                host->SendMouseWheelEvent(event, 0, delta);
+            }
+            else if (message == WM_MOUSEMOVE) {
+                host->SendMouseMoveEvent(event, false);
+            }
+            else {
+                // В некоторых версиях CEF имена перечислений MBT_* не находятся как члены CefBrowserHost,
+                // поэтому приводим числовое значение к типу MouseButtonType.
+                CefBrowserHost::MouseButtonType btn = static_cast<CefBrowserHost::MouseButtonType>(0); // left by default
+                if (message == WM_RBUTTONDOWN || message == WM_RBUTTONUP)
+                    btn = static_cast<CefBrowserHost::MouseButtonType>(1); // right
+                else if (message == WM_MBUTTONDOWN || message == WM_MBUTTONUP)
+                    btn = static_cast<CefBrowserHost::MouseButtonType>(2); // middle
+
+                bool mouse_up = (message == WM_LBUTTONUP || message == WM_RBUTTONUP || message == WM_MBUTTONUP);
+                int click_count = (message == WM_LBUTTONDBLCLK ? 2 : 1);
+                host->SendMouseClickEvent(event, btn, mouse_up, click_count);
+            }
+            return 0;
+        }
+
+        case WM_KEYDOWN:
+        case WM_KEYUP:
+        case WM_SYSKEYDOWN:
+        case WM_SYSKEYUP:
+        case WM_CHAR:
+        case WM_SYSCHAR: {
+            CefKeyEvent event;
+            event.windows_key_code = (int)wParam;
+            event.native_key_code = (int)lParam;
+            event.modifiers = GetCefStateModifiers(wParam);
+
+            if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
+                event.type = KEYEVENT_RAWKEYDOWN;
+            else if (message == WM_KEYUP || message == WM_SYSKEYUP)
+                event.type = KEYEVENT_KEYUP;
+            else
+                event.type = KEYEVENT_CHAR;
+
+            host->SendKeyEvent(event);
+            return 0;
+        }
+
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS: {
+            host->SetFocus(message == WM_SETFOCUS);
+            return 0;
+        }
+
+
+        case WM_NCHITTEST: {
+            LRESULT result = DefWindowProc(hWnd, message, wParam, lParam);
+            if (result == HTCLIENT) {
+                POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                ScreenToClient(hWnd, &pt);
+
+                // Проверяем draggable regions из CEF
+                bool is_draggable = false;
+                for (const auto& region : g_draggable_regions) {
+                    // region.bounds — CefRect с полями x,y,width,height
+                    const CefRect& b = region.bounds;
+                    if (region.draggable) {
+                        if (pt.x >= b.x && pt.x < b.x + b.width &&
+                            pt.y >= b.y && pt.y < b.y + b.height) {
+                            is_draggable = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (is_draggable) {
+                    return HTCAPTION;  // Drag окна
+                }
+
+                // Проверяем края для resize
+                RECT rc;
+                GetClientRect(hWnd, &rc);
+                int borderWidth = 10;
+
+                bool left = pt.x < borderWidth;
+                bool right = pt.x > rc.right - borderWidth;
+                bool top = pt.y < borderWidth;
+                bool bottom = pt.y > rc.bottom - borderWidth;
+
+                if (top && left)      return HTTOPLEFT;
+                if (top && right)     return HTTOPRIGHT;
+                if (bottom && left)   return HTBOTTOMLEFT;
+                if (bottom && right)  return HTBOTTOMRIGHT;
+                if (top)              return HTTOP;
+                if (bottom)           return HTBOTTOM;
+                if (left)             return HTLEFT;
+                if (right)            return HTRIGHT;
+            }
+            return result;
+        }
+        }
     }
-    case WM_COMMAND:
-    {
+
+    switch (message) {
+    case WM_COMMAND: {
         int wmId = LOWORD(wParam);
-        // Разобрать выбор в меню:
-        switch (wmId)
-        {
+        switch (wmId) {
         case IDM_ABOUT:
             DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
             break;
@@ -337,16 +424,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         default:
             return DefWindowProc(hWnd, message, wParam, lParam);
         }
+        break;
     }
-    break;
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        // TODO: Добавьте сюда любой код прорисовки, использующий HDC...
-        EndPaint(hWnd, &ps);
-    }
-    break;
     case WM_DESTROY:
         PostQuitMessage(0);
         break;
@@ -356,7 +435,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-// Обработчик сообщений для окна "О программе".
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
     UNREFERENCED_PARAMETER(lParam);
@@ -374,4 +452,26 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         break;
     }
     return (INT_PTR)FALSE;
+}
+
+// Вспомогательная функция для modifiers
+uint32_t GetCefStateModifiers(WPARAM wparam) {
+    uint32_t modifiers = 0;
+    if (wparam & MK_CONTROL)
+        modifiers |= EVENTFLAG_CONTROL_DOWN;
+    if (wparam & MK_SHIFT)
+        modifiers |= EVENTFLAG_SHIFT_DOWN;
+    if (GetKeyState(VK_MENU) < 0)
+        modifiers |= EVENTFLAG_ALT_DOWN;
+    if (wparam & MK_LBUTTON)
+        modifiers |= EVENTFLAG_LEFT_MOUSE_BUTTON;
+    if (wparam & MK_MBUTTON)
+        modifiers |= EVENTFLAG_MIDDLE_MOUSE_BUTTON;
+    if (wparam & MK_RBUTTON)
+        modifiers |= EVENTFLAG_RIGHT_MOUSE_BUTTON;
+    if (::GetKeyState(VK_CAPITAL) & 1)
+        modifiers |= EVENTFLAG_CAPS_LOCK_ON;
+    if (::GetKeyState(VK_NUMLOCK) & 1)
+        modifiers |= EVENTFLAG_NUM_LOCK_ON;
+    return modifiers;
 }
