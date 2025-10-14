@@ -61,6 +61,8 @@
 #pragma pop_macro("GetFirstChild")
 #pragma pop_macro("GetNextSibling")
 #include "resource.h"
+#include "Api.h"
+#include "JsBridgeApp.h"
 
 #define MAX_LOADSTRING 100
 
@@ -165,7 +167,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     CefSettings settings;
     settings.windowless_rendering_enabled = true;  // Включаем OSR
 
-    CefRefPtr<CefApp> app;
+    CefRefPtr<CefApp> app = new JsBridgeApp();
     int exit_code = CefExecuteProcess(main_args, app, nullptr);
     if (exit_code >= 0) {
         return exit_code;
@@ -427,6 +429,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
     }
     case WM_DESTROY:
+        CefShutdown();
         PostQuitMessage(0);
         break;
     default:
