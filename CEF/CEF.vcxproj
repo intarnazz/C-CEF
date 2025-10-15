@@ -130,6 +130,7 @@
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>C:\cef_binary_140.1.20+g49f5d09+chromium-140.0.7339.214_windows64;C:\Users\ortadox\AppData\Local\Programs\Python\Python313\include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

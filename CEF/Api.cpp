@@ -9,6 +9,12 @@ bool InitPythonApi() {
     if (Py_IsInitialized()) {
         return true;  // Already initialized (idempotent)
     }
+    PyStatus status;
+    PyConfig config;
+    PyConfig_InitPythonConfig(&config);
+
+    PyWideStringList_Append(&config.module_search_paths, L"./python313.zip");
+    PyWideStringList_Append(&config.module_search_paths, L"./DLLs");
     Py_Initialize();
     PyRun_SimpleString("import sys; sys.path.append('.')");
 
