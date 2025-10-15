@@ -63,6 +63,10 @@
 #include "resource.h"
 #include "Api.h"
 #include "JsBridgeApp.h"
+#include <mutex>
+#include <atomic>
+#include <d2d1.h>
+#pragma comment(lib, "d2d1.lib")
 
 #define MAX_LOADSTRING 100
 
@@ -73,6 +77,9 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // имя класса глав�
 CefRefPtr<CefBrowser> g_browser;
 HWND g_hwnd = nullptr;
 std::vector<CefDraggableRegion> g_draggable_regions;
+std::mutex g_draggable_mutex;
+static ID2D1HwndRenderTarget* renderTarget;
+
 
 // Отправить объявления функций, включенных в этот модуль кода:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
@@ -84,23 +91,88 @@ INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 uint32_t GetCefStateModifiers(WPARAM wparam);
 
 // Класс для обработки рендеринга и drag
+#include <mutex>
+#include <atomic>
+
 class SimpleHandler : public CefClient,
     public CefLifeSpanHandler,
-    public CefRenderHandler,
-    public CefDragHandler {
+    public CefDragHandler,
+    public CefRenderHandler {  // <-- Добавьте это
 public:
+    // CefClient: возвращаем handlers
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override {
         return this;
     }
-
-    CefRefPtr<CefRenderHandler> GetRenderHandler() override {
-        return this;
-    }
-
     CefRefPtr<CefDragHandler> GetDragHandler() override {
         return this;
     }
 
+    // CefClient: добавьте render handler
+    CefRefPtr<CefRenderHandler> GetRenderHandler() override {
+        return this;
+    }
+
+    // CefRenderHandler: обязательные методы
+    void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override {
+        RECT clientRect;
+        GetClientRect(g_hwnd, &clientRect);
+        rect = CefRect(0, 0, clientRect.right - clientRect.left, clientRect.bottom - clientRect.top);
+    }
+
+    void OnPaint(CefRefPtr<CefBrowser> browser, PaintElementType type, const RectList& dirtyRects,
+        const void* buffer, int width, int height) override {
+        // Инициализация D2D (один раз)
+        static ID2D1Factory* d2dFactory = nullptr;
+        static ID2D1HwndRenderTarget* renderTarget = nullptr;
+        if (!d2dFactory) {
+            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2dFactory);
+        }
+        if (!renderTarget) {
+            RECT rc;
+            GetClientRect(g_hwnd, &rc);
+            D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
+            D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties();
+            rtProps.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+            d2dFactory->CreateHwndRenderTarget(rtProps, D2D1::HwndRenderTargetProperties(g_hwnd, size), &renderTarget);
+        }
+
+        // Resize target если размер изменился
+        RECT rc;
+        GetClientRect(g_hwnd, &rc);
+        D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
+        renderTarget->Resize(size);
+
+        // Рендеринг буфера CEF в D2D bitmap
+        renderTarget->BeginDraw();
+        ID2D1Bitmap* bitmap = nullptr;
+        D2D1_BITMAP_PROPERTIES bitmapProps = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        D2D1_SIZE_U bitmapSize = D2D1::SizeU(width, height);
+        renderTarget->CreateBitmap(bitmapSize, buffer, width * 4, bitmapProps, &bitmap);  // buffer — ARGB от CEF (stride = width*4)
+
+        // Отрисовка всего буфера (или по dirtyRects для оптимизации)
+        for (const auto& dirty : dirtyRects) {
+            D2D1_RECT_F destRect = D2D1::RectF(dirty.x, dirty.y, dirty.x + dirty.width, dirty.y + dirty.height);
+            D2D1_RECT_F srcRect = destRect;  // 1:1
+            renderTarget->DrawBitmap(bitmap, destRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, srcRect);
+        }
+
+        renderTarget->EndDraw();
+        bitmap->Release();  // Освободите ресурсы
+    }
+
+    // CefDragHandler: получаем drag-регионы из рендерера
+    void OnDraggableRegionsChanged(CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        const std::vector<CefDraggableRegion>& regions) override {
+            {
+                std::lock_guard<std::mutex> lock(g_draggable_mutex);
+                g_draggable_regions = regions;
+            }
+            // Отладочная информация — убедитесь, что колбэк вызывается
+            OutputDebugStringA("OnDraggableRegionsChanged called\n");
+    }
+
+    // CefLifeSpanHandler
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
         g_browser = browser;
     }
@@ -113,44 +185,11 @@ public:
         g_browser = nullptr;
     }
 
-    // CefRenderHandler methods
-    void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override {
-        RECT client_rect;
-        GetClientRect(g_hwnd, &client_rect);
-        rect = CefRect(0, 0, client_rect.right - client_rect.left,
-            client_rect.bottom - client_rect.top);
-    }
-
-    void OnPaint(CefRefPtr<CefBrowser> browser,
-        PaintElementType type,
-        const RectList& dirtyRects,
-        const void* buffer,
-        int width,
-        int height) override {
-        // Простой рендеринг: Копируем буфер в window DC
-        HDC hdc = GetDC(g_hwnd);
-        BITMAPINFO bmi = { 0 };
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = width;
-        bmi.bmiHeader.biHeight = -height;  // top-down
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        StretchDIBits(hdc, 0, 0, width, height, 0, 0, width, height,
-            buffer, &bmi, DIB_RGB_COLORS, SRCCOPY);
-        ReleaseDC(g_hwnd, hdc);
-    }
-
-    // CefDragHandler
-    void OnDraggableRegionsChanged(CefRefPtr<CefBrowser> browser,
-        CefRefPtr<CefFrame> frame,
-        const std::vector<CefDraggableRegion>& regions) override {
-        g_draggable_regions = regions;
-    }
-
+private:
     IMPLEMENT_REFCOUNTING(SimpleHandler);
 };
+
+
 
 CefRefPtr<SimpleHandler> g_handler(new SimpleHandler());
 
@@ -165,7 +204,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     // Инициализация CEF
     CefMainArgs main_args(hInstance);
     CefSettings settings;
-    settings.windowless_rendering_enabled = true;  // Включаем OSR
+    settings.windowless_rendering_enabled = true;  // <-- Включите OSR
 
     CefRefPtr<CefApp> app = new JsBridgeApp();
     int exit_code = CefExecuteProcess(main_args, app, nullptr);
@@ -185,25 +224,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         return FALSE;
     }
 
-    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_CEF));
-
-    MSG msg;
-
-    while (GetMessage(&msg, nullptr, 0, 0))
-    {
-        if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
-        {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-
-        CefDoMessageLoopWork();
-    }
+    // Основной цикл сообщений CEF
+    CefRunMessageLoop();
 
     CefShutdown();
-
-    return (int)msg.wParam;
+    return 0;
 }
+
 
 ATOM MyRegisterClass(HINSTANCE hInstance)
 {
@@ -245,11 +272,15 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
         return FALSE;
 
     g_hwnd = hWnd;
-
-    // CEF в OSR mode
-    CefBrowserSettings browser_settings;
     CefWindowInfo window_info;
-    window_info.SetAsWindowless(hWnd);  // OSR: без HWND для браузера
+    window_info.SetAsWindowless(hWnd);  // <-- Для OSR, без дочернего окна
+
+    CefBrowserSettings browser_settings;
+    RECT rc;
+    GetClientRect(hWnd, &rc);
+    CefRect bounds(0, 0, rc.right - rc.left, rc.bottom - rc.top);
+    window_info.SetAsChild(hWnd, bounds);
+
 
     CefBrowserHost::CreateBrowser(window_info, g_handler,
         L"http://localhost:5173/",
@@ -267,22 +298,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         CefRefPtr<CefBrowserHost> host = g_browser->GetHost();
 
         switch (message) {
-        case WM_SIZE: {
-            int width = LOWORD(lParam);
-            int height = HIWORD(lParam);
-            host->WasResized();
+        case WM_GETMINMAXINFO: {
+            MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+            mmi->ptMinTrackSize.x = 200;  // Мин. ширина
+            mmi->ptMinTrackSize.y = 200;  // Мин. высота
             return 0;
         }
-
-        case WM_ERASEBKGND:
-            return 1;  // Не стираем фон, т.к. рендерим сами
-
         case WM_PAINT: {
             PAINTSTRUCT ps;
             BeginPaint(hWnd, &ps);
+            if (g_browser) g_browser->GetHost()->Invalidate(PET_VIEW);  // Запрос перерисовки
             EndPaint(hWnd, &ps);
             return 0;
         }
+        case WM_SIZE: {
+            int width = LOWORD(lParam);
+            int height = HIWORD(lParam);
+            if (renderTarget) {
+                D2D1_SIZE_U size = D2D1::SizeU(width, height);
+                renderTarget->Resize(size);
+            }
+            if (g_browser) {
+                g_browser->GetHost()->WasResized();
+            }
+            return 0;
+        }
+
+
+        case WM_ERASEBKGND:
+            return 1;  // Не стираем фон, т.к. рендерим сами
 
         case WM_CLOSE:
             host->CloseBrowser(false);
@@ -371,23 +415,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
                 ScreenToClient(hWnd, &pt);
 
-                // Проверяем draggable regions из CEF
+                // Проверяем draggable regions из CEF (под мьютексом)
                 bool is_draggable = false;
-                for (const auto& region : g_draggable_regions) {
-                    // region.bounds — CefRect с полями x,y,width,height
-                    const CefRect& b = region.bounds;
-                    if (region.draggable) {
-                        if (pt.x >= b.x && pt.x < b.x + b.width &&
-                            pt.y >= b.y && pt.y < b.y + b.height) {
-                            is_draggable = true;
-                            break;
+                {
+                    std::lock_guard<std::mutex> lock(g_draggable_mutex);
+                    for (const auto& region : g_draggable_regions) {
+                        const CefRect& b = region.bounds;
+                        if (region.draggable) {
+                            if (pt.x >= b.x && pt.x < b.x + b.width &&
+                                pt.y >= b.y && pt.y < b.y + b.height) {
+                                is_draggable = true;
+                                break;
+                            }
                         }
                     }
                 }
+                if (is_draggable) return HTCAPTION;
 
-                if (is_draggable) {
-                    return HTCAPTION;  // Drag окна
-                }
 
                 // Проверяем края для resize
                 RECT rc;
