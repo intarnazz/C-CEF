@@ -1,11 +1,14 @@
 #include "Api.h"
 #include <Python.h>
 #include <iostream>
+#include <mutex>
 
 static PyObject* pModule = nullptr;
 static PyObject* pFunc = nullptr;
+static std::mutex python_mutex;
 
 bool InitPythonApi() {
+    std::lock_guard<std::mutex> lock(python_mutex);
     if (Py_IsInitialized()) {
         return true;  // Already initialized (idempotent)
     }
@@ -40,6 +43,7 @@ bool InitPythonApi() {
 }
 
 std::string CallPython(const std::string& json) {
+    std::lock_guard<std::mutex> lock(python_mutex);
     if (!pFunc) return "{\"error\":\"Python API не инициализирован\"}";
 
     PyObject* pArgs = PyTuple_Pack(1, PyUnicode_FromString(json.c_str()));
@@ -58,6 +62,7 @@ std::string CallPython(const std::string& json) {
 }
 
 void ShutdownPythonApi() {
+    std::lock_guard<std::mutex> lock(python_mutex);
     Py_XDECREF(pFunc);
     Py_XDECREF(pModule);
     if (Py_IsInitialized()) Py_Finalize();
