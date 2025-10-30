@@ -92,6 +92,8 @@ INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 // Прототип функции modifiers (надо объявить до использования в WndProc)
 uint32_t GetCefStateModifiers(WPARAM wparam);
 
+std::atomic<bool> g_is_closing = false;
+
 // Класс для обработки рендеринга и drag
 #include <mutex>
 #include <atomic>
@@ -131,10 +133,19 @@ public:
     }
 
 
+    // ... (остальной код без изменений)
+
+    // В классе SimpleHandler, в OnBeforeClose:
     void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
         // Сбрасываем соответствующую глобальную ссылку
         if (this == g_main_handler.get()) {
             g_main_browser = nullptr;
+        }
+
+        // Если все браузеры закрыты (в вашем случае только один), выходим из message loop
+        if (!g_main_browser) {
+            // Опционально: DestroyWindow(g_hwnd); // Если хотите явно закрыть окно перед выходом
+            CefQuitMessageLoop();
         }
     }
 
@@ -285,12 +296,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 1;  // Не стираем фон, т.к. рендерим сами
 
     case WM_CLOSE:
-        // Закрываем оба браузера корректно
-        if (g_main_browser) {
-            g_main_browser->GetHost()->CloseBrowser(false);
-            // не делаем DestroyWindow пока браузер не закроется (OnBeforeClose)
-            return 0;
+        if (g_is_closing) {
+            return 0;  // Игнорируем повторные клики
         }
+        g_is_closing = true;
+
+        // Закрываем браузер(ы) корректно
+        if (g_main_browser) {
+            g_main_browser->GetHost()->CloseBrowser(false);  // Gentle close
+            return 0;  // Не разрушаем окно сразу
+        }
+
+        // Если браузера уже нет, разрушаем окно
+        DestroyWindow(hWnd);
+        return 0;
 
         DestroyWindow(hWnd);
         return 0;
